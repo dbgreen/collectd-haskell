@@ -1,0 +1,88 @@
+> {-# LANGUAGE BangPatterns, ViewPatterns #-}
+> module Parser.Cache where
+
+> import qualified Data.ByteString.Lazy.Char8 as L8
+> import qualified Data.ByteString.Lazy as L
+> import qualified Data.Word as W
+> import Data.Bits
+
+> data Part =    Host               L.ByteString 
+>              | HighResTimer       W.Word64
+>              | Plugin             L.ByteString
+>              | PluginInstance     L.ByteString
+>              | XType              L.ByteString
+>              | TypeInstance       L.ByteString
+>              | Values             [(W.Word8,W.Word64)]
+>              | Interval           W.Word64
+>              | HighResTime        W.Word64
+>              | HighResInterval    W.Word64
+>              | Message            L.ByteString
+>              | Severity           L.ByteString
+>      deriving (Eq,Show)
+      
+> convert :: W.Word8 -> W.Word8 -> W.Word16
+> convert upper lower =
+>    let low = (fromIntegral(lower)::W.Word16)
+>        high = (fromIntegral(upper)::W.Word16) in
+>        (high `shiftL` 8) .|. low  
+
+> getBytes n str = let count           = fromIntegral n
+>                      both@(prefix,_) = L.splitAt count str
+>                  in if L.length prefix < count
+>                     then Nothing
+>                     else Just both
+
+> getShortInt :: L.ByteString -> Maybe(Int, L.ByteString)
+> getShortInt s = case getBytes 2 s of   
+>                    Nothing -> Nothing
+>                    Just(pType,rest) -> Just(fromIntegral(convert (L.head pType) (L.last pType))::Int,rest)
+                    
+> getPartType :: L.ByteString -> Maybe (Int, L.ByteString)
+> getPartType s = getShortInt s
+> getPartLength :: L.ByteString -> Maybe (Int, L.ByteString)
+> getPartLength s = getShortInt s
+
+> getPartData :: Int -> L.ByteString -> Maybe (L.ByteString, L.ByteString)
+> getPartData length s = getBytes length s
+
+> timer64 :: L.ByteString -> W.Word64
+> timer64 = L.foldl' (\x y -> x * 256 + fromIntegral y) 0
+
+> stringify :: L.ByteString -> L.ByteString
+> stringify s = L.takeWhile (/= 0x00) s 
+
+> getPart :: Int -> L.ByteString ->  L.ByteString -> Maybe (Part, L.ByteString)
+> getPart pType pData s3 =  case pType of
+>                     0 -> Just (Host pData, s3)
+>                     1 -> Just (HighResTimer (timer64 pData), s3)
+>                     2 -> Just (Plugin pData, s3)
+>                     3 -> Just (PluginInstance pData, s3)
+>                     4 -> Just (XType pData, s3)
+>                     5 -> Just (TypeInstance pData, s3)
+>                     6 -> Just (Values [(3,5)], s3)
+>                     7 -> Just (Interval (timer64 pData), s3)
+>                     8 -> Just (HighResTime (timer64 pData), s3)
+>                     9 -> Just (HighResInterval (timer64 pData), s3)
+>                     0x100 -> Just (Message pData, s3)
+>                     0x101 -> Just (Severity pData, s3)
+>                     _ -> Nothing
+
+> (>>?) :: Maybe a -> (a -> Maybe b) -> Maybe b
+> Nothing >>? _ = Nothing
+> Just v  >>? f = f v
+
+> parsePart :: L.ByteString -> Maybe (Part, L.ByteString)
+> parsePart s =
+>   getPartType s >>? 
+>   \(pType, s) -> getPartLength s >>?
+>   \(pLength,s) -> getPartData (pLength - 4) s >>?
+>   \(pData, s) -> getPart pType pData s       
+
+> parsePacket :: L.ByteString -> [Part]
+> parsePacket (L.uncons -> Nothing) = []
+> parsePacket s =
+>   case parsePart s of
+>      Nothing -> []
+>      Just (aPart, s1) ->
+>         aPart:(parsePacket s1)    
+
